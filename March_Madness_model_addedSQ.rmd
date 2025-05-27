@@ -1,0 +1,1614 @@
+---
+title: "XGBoosting March with Shot Quality"
+author: "Brian Papiernik"
+date: "2025-03-26"
+output: html_document
+---
+
+```{r}
+
+library(tidyverse)
+library(stringr)
+library(plyr)
+library(hoopR)
+library(gtools) # Load gtools package
+library(RCurl) # Load RCurl
+library(png) # Load jpeg
+library(grid) # Load grid
+library(ggplot2) # Load ggplot2
+library(magick)
+library(dplyr)
+library(tidyr)
+library(cbbdata)
+library(randomForest) # Load randomForest package to run bagging
+library(rpart) # Load rpart for decision trees
+library(caret) # Used for analysing results
+library(splitstackshape) # Used for stratified sampling
+library(xgboost) # Load XGBoost
+library(pROC) # Load proc
+library(SHAPforxgboost) # Load shap for XGBoost
+library(caTools)
+library(GGally)
+library(data.table)
+library(gh)
+library(commonmark)
+library(xgboostExplainer)
+library(ggimage)
+library(rvest)
+
+```
+
+### 2024-25
+
+Acquire 2024-25 NCAA game team box score data
+```{r}
+temp <- load_mbb_team_box(2025)
+
+# gameid = id
+temp <- temp %>%
+  mutate(game_date = as.Date(game_date)) %>%
+  filter(game_date <= "2025-03-16") #end of regular season
+
+cbb_season_results <- temp %>%
+  select(-c("fast_break_points", "points_in_paint", "turnover_points"))
+
+total_cbb_season_results <- cbb_season_results
+
+```
+
+### 2023-24
+
+```{r}
+temp <- load_mbb_team_box(2024)
+
+# gameid = id
+temp <- temp %>%
+  mutate(game_date = as.Date(game_date)) %>%
+  filter(game_date <= "2024-03-17")
+
+cbb_season_results <- temp %>%
+  select(-c("fast_break_points", "points_in_paint", "turnover_points"))
+
+mm_schedule <- load_mbb_schedule(2024) %>%
+    mutate(game_date = as.Date(game_date)) %>%
+    filter(game_date > "2024-03-17") %>% #end of regular season
+    filter(grepl("men's basketball championship", notes_headline, ignore.case = TRUE)
+             & !grepl("first four", notes_headline, ignore.case = TRUE)) 
+
+mm_schedule_gameid <- mm_schedule$id
+
+mm_games <- load_mbb_team_box(2024) %>%
+  select(-c("fast_break_points", "points_in_paint", "turnover_points")) %>%
+  filter(game_id %in% mm_schedule_gameid)
+  
+
+
+total_cbb_season_results <- rbind(total_cbb_season_results , cbb_season_results, mm_games)
+
+```
+
+### 2022-23
+
+```{r}
+temp <- load_mbb_team_box(2023)
+
+# gameid = id
+temp <- temp %>%
+  mutate(game_date = as.Date(game_date)) %>%
+  filter(game_date <= "2023-03-12")
+
+cbb_season_results <- temp 
+
+mm_schedule <- load_mbb_schedule(2023) %>%
+    mutate(game_date = as.Date(game_date)) %>%
+    filter(game_date > "2023-03-12") %>% #end of regular season
+    filter(grepl("men's basketball championship", notes_headline, ignore.case = TRUE)
+             & !grepl("first four", notes_headline, ignore.case = TRUE)) 
+
+mm_schedule_gameid <- mm_schedule$id
+
+mm_games <- load_mbb_team_box(2023) %>%
+  filter(game_id %in% mm_schedule_gameid)
+  
+
+
+total_cbb_season_results <- rbind(total_cbb_season_results , cbb_season_results, mm_games)
+```
+
+### 2021-22
+
+```{r}
+temp <- load_mbb_team_box(2022)
+
+# gameid = id
+temp <- temp %>%
+  mutate(game_date = as.Date(game_date)) %>%
+  filter(game_date <= "2022-03-13")
+
+cbb_season_results <- temp 
+
+mm_schedule <- load_mbb_schedule(2022) %>%
+    mutate(game_date = as.Date(game_date)) %>%
+    filter(game_date > "2022-03-13") %>% #end of regular season
+    filter(grepl("men's basketball championship", notes_headline, ignore.case = TRUE)
+             & !grepl("first four", notes_headline, ignore.case = TRUE)) 
+
+mm_schedule_gameid <- mm_schedule$id
+
+mm_games <- load_mbb_team_box(2022) %>%
+  filter(game_id %in% mm_schedule_gameid)
+  
+
+
+total_cbb_season_results <- rbind(total_cbb_season_results , cbb_season_results, mm_games)
+```
+
+### 2020-21
+
+```{r}
+temp <- load_mbb_team_box(2021)
+
+# gameid = id
+temp <- temp %>%
+  mutate(game_date = as.Date(game_date)) %>%
+  filter(game_date <= "2021-03-14")
+
+cbb_season_results <- temp 
+
+mm_schedule <- load_mbb_schedule(2021) %>%
+    mutate(game_date = as.Date(game_date)) %>%
+    filter(game_date > "2021-03-14") %>% #end of regular season
+    filter(grepl("men's basketball championship", notes_headline, ignore.case = TRUE)
+             & !grepl("first four", notes_headline, ignore.case = TRUE)) 
+
+mm_schedule_gameid <- mm_schedule$id
+
+mm_games <- load_mbb_team_box(2021) %>%
+  filter(game_id %in% mm_schedule_gameid)
+  
+
+
+total_cbb_season_results <- rbind(total_cbb_season_results , cbb_season_results, mm_games) #row bind every game from 2021 season to 2025 season
+```
+
+
+```{r}
+total_games1 <- total_cbb_season_results 
+```
+
+
+
+# Torvik Data
+
+In the code below, we create multiple datasets to link the team Torvik metrics together with the player metrics from EvanMiya.com for each team's top 8 players.
+
+Logs into cbbdata and pulls team-level efficiency metrics and seeds from Torvik for 2021–2025
+
+```{r}
+
+
+cbbdata::cbd_login(username = "", password = '')
+
+
+years <- 2021:2025
+torvik_seeds <- data.frame()
+
+for (yr in years) {
+  temp_seed <- cbd_torvik_ratings(year = yr) %>%
+    select(team, year, seed) %>%
+    dplyr::rename(TEAM = team, YEAR = year, SEED = seed)
+  
+  torvik_seeds <- bind_rows(torvik_seeds, temp_seed)
+}
+
+
+torvik <- data.frame()  
+
+for (yr in years) {
+  temp <- cbd_torvik_team_factors(year = yr, no_bias = TRUE) %>%
+
+    dplyr::rename(
+      TEAM = team,
+      ADJOE = adj_o,
+      ADJOD = adj_d,
+      BARTHAG = barthag,
+      EFG_O = efg,
+      EFG_D = def_efg,
+      TOR = tov_rate,
+      TORD = def_tov_rate,
+      ORB = oreb_rate,
+      DRB = dreb_rate,
+      FTR = ftr,
+      FTRD = def_ftr,
+      X2P_O = two_pt_pct,
+      X2P_D = def_two_pt_pct,
+      X3P_O = three_pt_pct,
+      X3P_D = def_three_pt_pct,
+      WAB = wab,
+      ADJ_T = adj_t,
+      YEAR = year
+    )
+  
+  torvik <- bind_rows(torvik, temp)
+}
+
+torvik <- torvik %>%
+  left_join(torvik_seeds, by = c("TEAM", "YEAR"))
+```
+
+```{r}
+# Standardizes team names to prepare for merging with EvanMiya and ShotQuality datasets
+torvik$TEAM <- str_replace_all(torvik$TEAM, "Connecticut", "UConn")
+torvik$TEAM <- str_replace_all(torvik$TEAM, "Grambling State", "Grambling")
+torvik$TEAM <- str_replace_all(torvik$TEAM, "\\bSt\\.", "State")
+torvik$TEAM <- str_replace_all(torvik$TEAM, "N.C. State", "NC State")
+torvik$TEAM <- str_replace_all(torvik$TEAM, "Miami FL", "Miami")
+torvik$TEAM <- str_replace(torvik$TEAM, "College of Charleston", "Charleston")
+torvik$TEAM <- str_replace(torvik$TEAM, "Texas A&M Corpus Chris", "Texas A&M-Corpus Christi")
+torvik$TEAM <- str_replace(torvik$TEAM, "State John's", "St. John's")
+torvik$TEAM <- str_replace(torvik$TEAM, "Arkansas Little Rock", "Little Rock")
+torvik$TEAM <- str_replace(torvik$TEAM, "Mississippi", "Ole Miss")
+torvik$TEAM <- str_replace(torvik$TEAM, "Ole Miss State", "Mississippi State")
+torvik$TEAM <- str_replace(torvik$TEAM, "State Bonaventure", "St. Bonaventure")
+torvik$TEAM <- str_replace(torvik$TEAM, "Mount State Mary's", "Mount St. Mary's")
+torvik$TEAM <- str_replace(torvik$TEAM, "LIU Brooklyn", "Long Island University")
+torvik$TEAM <- str_replace(torvik$TEAM, "Louisiana Lafayette", "Lafayette")
+torvik$TEAM <- str_replace(torvik$TEAM, "Gardner Webb", "Gardner-Webb")
+torvik$TEAM <- str_replace_all(torvik$TEAM, "McNeese State", "McNeese")
+torvik$TEAM <- str_replace_all(torvik$TEAM, "Grambling State", "Grambling")
+torvik$TEAM <- str_replace_all(torvik$TEAM, "Grambling State", "Grambling")
+```
+
+```{r}
+# Backup copy of torvik dataframe before merging
+torvik1 <- torvik
+```
+
+# EvanMiya Data
+
+```{r}
+# Loads EvanMiya player-level impact metrics for the top 8 players on each team from 2021–2025
+players2025 <- read.csv("evanmiyaplayer2025.csv")
+players2024 <- read.csv("evanmiyaplayer2024.csv")
+players2023 <- read.csv("evanmiyaplayer2023.csv")
+players2022 <- read.csv("evanmiyaplayer2022.csv")
+players2021 <- read.csv("evanmiyaplayer2021.csv")
+```
+
+```{r}
+players <- rbind(players2021, players2022, players2023, players2024, players2025)
+```
+
+```{r}
+# Re-labels EvanMiya team names to match Torvik's and manually adds a few missing teams
+players <- players %>%
+  mutate(team = case_when(
+    team == "Connecticut" ~ "UConn",
+    team == "McNeese State" ~ "McNeese",
+    team == "College of Charleston" ~ "Charleston",
+    team == "Miami (Fla.)" ~ "Miami",
+    team == "Texas A&M-Corpus Christi" ~ "Texas A&M-Corpus Christi",
+    team == "Saint John's" ~ "St. John's",
+    team == "Arkansas-Little Rock" ~ "Little Rock",
+    team == "Saint Bonaventure" ~ "St. Bonaventure",
+    team == "Prairie View" ~ "Prairie View A&M",
+    team == "Arkansas-Pine Bluff" ~ "Arkansas Pine Bluff",
+    team == "Bethune-Cookman" ~ "Bethune Cookman" ,
+    team == "California Baptist" ~ "Cal Baptist" ,
+    team == "Central Connecticut" ~ "Central UConn",
+    team == "Detroit" ~ "Detroit Mercy",
+    team == "Florida International" ~ "FIU",
+    team == "Illinois-Chicago" ~ "Illinois Chicago",
+    team == "Long Island" ~ "LIU",
+    team == "Louisiana-Lafayette" ~ "Louisiana",
+    team == "Louisiana-Monroe" ~ "Louisiana Monroe",
+    team == "Loyola Maryland" ~ "Loyola MD",
+    team == "Maryland-Eastern Shore" ~ "Maryland Eastern Shore",
+    team == "Miami (Ohio)" ~ "Miami OH",
+    team == "Omaha" ~ "Nebraska Omaha",
+    team == "Mississippi Valley State" ~ "Ole Miss Valley State",
+    team == "Fort Wayne" ~ "Purdue Fort Wayne",
+    team == "Saint Francis (PA)" ~ "Saint Francis",
+    team == "Southern Mississippi" ~ "Southern Miss",
+    team == "Saint Thomas (Minn.)" ~ "State Thomas",
+    team == "Tennessee-Martin" ~ "Tennessee Martin",
+    team == "Texas A&M-Commerce" ~ "Texas A&M Commerce",
+    team == "Missouri-Kansas City" ~ "UMKC",
+    team == "South Carolina Upstate" ~ "USC Upstate",
+    team == "Texas-Rio Grande Valley" ~ "UT Rio Grande Valley",
+    TRUE ~ team
+  ))
+
+players <- add_row(players, team = "Hartford", Year = 2021)
+players <- add_row(players, team = "St. Francis (NY)", Year = 2021)
+players <- add_row(players, team = "St. Francis (NY)", Year = 2022)
+players <- add_row(players, team = "St. Francis (NY)", Year = 2023)
+
+```
+
+```{r}
+
+teams <- torvik %>%
+  select(TEAM, YEAR)
+```
+
+```{r}
+# Keeps only EvanMiya player rows that match Torvik team-years
+players1 <- players %>%
+  inner_join(teams, by = c("team" = "TEAM", "Year" = "YEAR"))
+
+```
+
+
+```{r}
+# Ranks players by BPR, selects the top 8 per team-year, and pivots data wide for model input
+
+players1$player_rank <- with(players1, ave(-bpr, list(team, Year), FUN = function(x) rank(x, ties.method = "first")))
+top_players1 <- players1[players1$player_rank <= 8, ]
+
+top_players1 <- top_players1 %>%
+  mutate(player_identifier = paste("Player", player_rank))
+
+
+top_players_wide <- top_players1 %>%
+  pivot_wider(
+    id_cols = c(team, Year),
+    names_from = player_identifier,
+    values_from = c(bpr, dbpr, obpr),
+    names_sep = "_"
+  )
+```
+
+```{r}
+# Identifies which teams have no matching top 8 players for verification
+missing_teams <- teams %>%
+  anti_join(top_players_wide, by = c("TEAM" = "team"))
+
+```
+
+
+```{r}
+# Drops BPR columns to avoid duplication in the merged dataset
+top_players_wide <- top_players_wide %>%
+  select(-c(`bpr_Player 1`, `bpr_Player 2`, `bpr_Player 3`, `bpr_Player 4`, `bpr_Player 5`, `bpr_Player 6`, `bpr_Player 7`, `bpr_Player 8`))
+```
+
+
+
+```{r}
+# Merges team-level Torvik data with top 8 EvanMiya player metrics
+torvik_evanmiya <- merge(torvik, top_players_wide, by.x = c("TEAM","YEAR"), by.y = c("team","Year"))
+```
+
+# Shot Quality Player Metrics
+
+```{r}
+# Loads player-level ShotQuality data across five seasons and processes for top 8 contributors
+sq_players2025 <- read.csv("Shot_Quality_player2025.csv")
+sq_players2024 <- read.csv("Shot_Quality_player2024.csv")
+sq_players2023 <- read.csv("Shot_Quality_player2023.csv")
+sq_players2022 <- read.csv("Shot_Quality_player2022.csv")
+sq_players2021 <- read.csv("Shot_Quality_player2021.csv")
+
+sq_players2025 <- sq_players2025 %>%
+  mutate(YEAR = 2025)
+sq_players2024 <- sq_players2024 %>%
+  mutate(YEAR = 2024)
+sq_players2023 <- sq_players2023 %>%
+  mutate(YEAR = 2023)
+sq_players2022 <- sq_players2022 %>%
+  mutate(YEAR = 2022)
+sq_players2021 <- sq_players2021 %>%
+  mutate(YEAR = 2021)
+
+sq_players <- rbind(sq_players2021, sq_players2022, sq_players2023, sq_players2024, sq_players2025)
+
+sq_players <- sq_players %>%
+  select(-c(Possessions, SQ.PPP.Rank, Bad_Possession_Rate, Rim_and_3_rate, Assists_per_game))
+
+#  Rank players by SQ.PPP (higher is better) within each Team and YEAR
+sq_players$player_rank <- with(sq_players, ave(-SQ.PPP, list(Team, YEAR), FUN = function(x) rank(x, ties.method = "first")))
+
+# Filter to top 8 players per team-year
+top_sq_players <- sq_players[sq_players$player_rank <= 8, ]
+
+# Create a player identifier
+top_sq_players <- top_sq_players %>%
+  mutate(player_identifier = paste("Player", player_rank))
+
+# Pivot wider
+top_sq_players_wide <- top_sq_players %>%
+  pivot_wider(
+    id_cols = c(Team, YEAR),
+    names_from = player_identifier,
+    values_from = c(SQ.PPP, Good_Possession_Rate, Shot.Making),
+    names_sep = "_"
+  )
+
+
+```
+
+# Shot Quality Team Play Style Metrics
+
+```{r}
+# Loads player-level ShotQuality data across five seasons and processes for top 8 contributors
+
+sq_team2025 <- read.csv("Shot_Quality_Team2025.csv")
+sq_team2024 <- read.csv("Shot_Quality_Team2024.csv")
+sq_team2023 <- read.csv("Shot_Quality_Team2023.csv")
+sq_team2022 <- read.csv("Shot_Quality_Team2022.csv")
+sq_team2021 <- read.csv("Shot_Quality_Team2021.csv")  
+
+sq_team2025 <- sq_team2025 %>%
+  mutate(YEAR = 2025)
+sq_team2024 <- sq_team2024 %>%
+  mutate(YEAR = 2024)
+sq_team2023 <- sq_team2023 %>%
+  mutate(YEAR = 2023)
+sq_team2022 <- sq_team2022 %>%
+  mutate(YEAR = 2022)
+sq_team2021 <- sq_team2021 %>%
+  mutate(YEAR = 2021)
+  
+sq_team <- rbind(sq_team2021, sq_team2022, sq_team2023, sq_team2024, sq_team2025)
+
+# Loads and combines team-level ShotQuality metrics with shot type frequency and efficiency
+
+sq_team <- sq_team %>%
+  select(Team_Name, YEAR, Offensive_Shot_Quality, Defensive_Shot_Quality, Rim_and_3_rate)
+
+sq_team_shottype2025 <- read.csv("Shot_Quality_Team_ShotType2025.csv")
+sq_team_shottype2024 <- read.csv("Shot_Quality_Team_ShotType2024.csv")
+sq_team_shottype2023 <- read.csv("Shot_Quality_Team_ShotType2023.csv")
+sq_team_shottype2022 <- read.csv("Shot_Quality_Team_ShotType2022.csv")
+sq_team_shottype2021 <- read.csv("Shot_Quality_Team_ShotType2021.csv")   
+
+sq_team_shottype2025 <- sq_team_shottype2025 %>%
+  mutate(YEAR = 2025)
+sq_team_shottype2024 <- sq_team_shottype2024 %>%
+  mutate(YEAR = 2024)
+sq_team_shottype2023 <- sq_team_shottype2023 %>%
+  mutate(YEAR = 2023)
+sq_team_shottype2022 <- sq_team_shottype2022 %>%
+  mutate(YEAR = 2022)
+sq_team_shottype2021 <- sq_team_shottype2021 %>%
+  mutate(YEAR = 2021)
+  
+sq_team_shottype <- rbind(sq_team_shottype2021, sq_team_shottype2022, sq_team_shottype2023, sq_team_shottype2024, sq_team_shottype2025)
+
+sq_team_shottype <- sq_team_shottype %>%
+  select(Logos, YEAR, 
+         X3PT.Frequency, X3PT.SQ.PPP, 
+         Catch...Shoot.3PT.Frequency, Catch...Shoot.3PT.SQ.PPP,
+         Cut.Frequency, Cut.SQ.PPP,
+         Finishing.at.the.Rim.Frequency, Finishing.at.the.Rim.SQ.PPP,
+         Half.Court.Frequency, Half.Court.SQ.PPP,
+         Isolation.Frequency, Isolation.SQ.PPP,
+         Midrange.Frequency, Midrange.SQ.PPP,
+         Off.the.Dribble.3PT.Frequency, Off.the.Dribble.3PT.SQ.PPP,
+         Off.Screen.Frequency, Off.Screen.SQ.PPP,
+         P.R.Ball.Screen.Frequency, P.R.Ball.Screen.SQ.PPP,
+         Post.Up.Frequency, Post.Up.SQ.PPP,
+         Transition.Frequency, Transition.SQ.PPP)
+
+# Merges team play style data with top 8 ShotQuality player metrics
+
+total_sq_team <- merge(sq_team, sq_team_shottype, by.x = c("Team_Name","YEAR"), by.y = c("Logos", "YEAR"))
+
+missing_teams <- dplyr::anti_join(
+  total_sq_team, 
+  top_sq_players_wide, 
+  by = c("Team_Name" = "Team", "YEAR" = "YEAR")
+)
+
+final_sq_playersteam <- merge(
+  total_sq_team,
+  top_sq_players_wide,
+  by.x = c("Team_Name", "YEAR"),
+  by.y = c("Team", "YEAR"),
+  all.x = TRUE
+)
+
+# Final name cleaning to unify ShotQuality and Torvik/EvanMiya datasets
+
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "\\bSt\\.", "State")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "State John's", "St. John's")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "State Bonaventure", "St. Bonaventure")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "State Francis PA", "Saint Francis")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Connecticut", "UConn")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Detroit", "Detroit Mercy")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Gardner Webb", "Gardner-Webb")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Grambling State", "Grambling")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "McNeese State", "McNeese")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "N.C. State", "NC State")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Miami FL", "Miami")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Texas A&M Corpus Chris", "Texas A&M-Corpus Christi")
+torvik_evanmiya$TEAM <- str_replace_all(torvik_evanmiya$TEAM, "Ole Miss", "Mississippi")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Mount State Mary's", "Mount St. Mary's")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Stonehill College", "Stonehill")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Queens of Charlotte", "Queens")
+final_sq_playersteam$Team_Name <- str_replace_all(final_sq_playersteam$Team_Name, "Mercyhurst Lakers", "Mercyhurst")
+
+
+
+```
+
+
+```{r}
+all_teams <- merge(torvik_evanmiya, final_sq_playersteam, by.x = c("TEAM", "YEAR"), by.y = c("Team_Name","YEAR"), all.x =  TRUE)
+
+all_mm_teams <- all_teams %>%
+  filter(SEED <= 16)
+
+write.csv(all_teams, "allteams_SQ.csv", row.names = FALSE)
+write.csv(all_mm_teams, "allmm_teams_SQ.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+metrics <- all_mm_teams
+
+metrics2 <- all_teams
+
+metrics <- metrics %>%
+  mutate_at(.vars = 33:99, .funs = ~replace(., is.na(.), 0))
+
+metrics2 <- metrics2 %>%
+  mutate_at(.vars = 33:99, .funs = ~replace(., is.na(.), 0))
+
+opp_metrics <- metrics2 %>%
+  rename_with(~paste0("opp_",.), everything())
+
+naismith <- merge(total_games1, metrics, by.x = c("team_location", "season"), by.y = c("TEAM", "YEAR"))
+head(naismith)
+
+naismith1 <- merge(naismith, opp_metrics, by.x = c("opponent_team_location", "season"), by.y = c("opp_TEAM", "opp_YEAR"), all.x = TRUE, all.y = FALSE)
+head(naismith1)
+
+```
+
+Exploratory to see how many games had na values for opponent metrics.
+
+```{r}
+naismith_nulls <- naismith1[is.na(naismith1$opp_BARTHAG),]
+```
+
+```{r}
+teams <- data.frame(unique(naismith_nulls$opponent_team_location))
+
+```
+
+Here we eliminate the rows (games) were there are na values for opponent team metrics.
+
+```{r}
+naismith1_no_nulls <- naismith1[!is.na(naismith1$opp_BARTHAG),]
+head(naismith1_no_nulls)
+```
+
+In the code below, we select only the columns that are related to team metrics and opponent team metrics with our dependent variable "team winner" that indicates if the march madness team ended up winning the game or not. After, we switched the Boolean to a binary variable
+
+```{r}
+james_naismith <- naismith1_no_nulls %>%
+  select(c(1:3,20,59:75,85:151,156:172,182:248)) %>%
+  mutate(team_winner = ifelse(team_winner == TRUE, 1, 0))
+
+james_naismith
+
+
+```
+
+
+
+
+In the code below, we create differential variables based on the different team metrics and subtracting these team metrics by the opponent team metrics.
+
+```{r}
+# Initialize the new data frame as a copy of the original
+james_naismith_diff <- james_naismith
+
+# Loop through the column pairs and calculate differences, then rename using the 5th column's name
+for (i in 5:88) {
+  column_name = names(james_naismith)[i]
+  new_column_name = paste("diff", column_name, sep = "_")
+  james_naismith_diff[[new_column_name]] = james_naismith[[i]] - james_naismith[[i + 84]]
+}
+
+
+james_naismith_diff
+
+
+```
+Here, we select only the differential variables
+
+```{r}
+james_naismith_diff2 <- james_naismith_diff %>%
+  select(1:4,173:256)
+james_naismith_diff2
+```
+
+We removed some variables for purposes later on.
+```{r}
+james_naismith_diff2 <- james_naismith_diff2 %>%
+  select(-c(diff_ADJ_T, diff_BARTHAG, diff_ADJOE, diff_ADJOD, diff_ft_pct, diff_Offensive_Shot_Quality, diff_Defensive_Shot_Quality))
+
+james_naismith_diff2 <- james_naismith_diff2 %>%
+  dplyr::rename(
+    diff_dbpr_Player_1 = `diff_dbpr_Player 1`,
+    diff_dbpr_Player_2 = `diff_dbpr_Player 2`,
+    diff_dbpr_Player_3 = `diff_dbpr_Player 3`,
+    diff_dbpr_Player_4 = `diff_dbpr_Player 4`,
+    diff_dbpr_Player_5 = `diff_dbpr_Player 5`,
+    diff_dbpr_Player_6 = `diff_dbpr_Player 6`,
+    diff_dbpr_Player_7 = `diff_dbpr_Player 7`,
+    diff_dbpr_Player_8 = `diff_dbpr_Player 8`,
+    diff_obpr_Player_1 = `diff_obpr_Player 1`,
+    diff_obpr_Player_2 = `diff_obpr_Player 2`,
+    diff_obpr_Player_3 = `diff_obpr_Player 3`,
+    diff_obpr_Player_4 = `diff_obpr_Player 4`,
+    diff_obpr_Player_5 = `diff_obpr_Player 5`,
+    diff_obpr_Player_6 = `diff_obpr_Player 6`,
+    diff_obpr_Player_7 = `diff_obpr_Player 7`,
+    diff_obpr_Player_8 = `diff_obpr_Player 8`,
+    diff_Good_Possession_Rate_Player_1 = `diff_Good_Possession_Rate_Player 1`,
+    diff_Good_Possession_Rate_Player_2 = `diff_Good_Possession_Rate_Player 2`,
+    diff_Good_Possession_Rate_Player_3 = `diff_Good_Possession_Rate_Player 3`,
+    diff_Good_Possession_Rate_Player_4 = `diff_Good_Possession_Rate_Player 4`,
+    diff_Good_Possession_Rate_Player_5 = `diff_Good_Possession_Rate_Player 5`,
+    diff_Good_Possession_Rate_Player_6 = `diff_Good_Possession_Rate_Player 6`,
+    diff_Good_Possession_Rate_Player_7 = `diff_Good_Possession_Rate_Player 7`,
+    diff_Good_Possession_Rate_Player_8 = `diff_Good_Possession_Rate_Player 8`,
+    diff_Shot.Making_Player_1 = `diff_Shot.Making_Player 1`,
+    diff_Shot.Making_Player_2 = `diff_Shot.Making_Player 2`,
+    diff_Shot.Making_Player_3 = `diff_Shot.Making_Player 3`,
+    diff_Shot.Making_Player_4 = `diff_Shot.Making_Player 4`,
+    diff_Shot.Making_Player_5 = `diff_Shot.Making_Player 5`,
+    diff_Shot.Making_Player_6 = `diff_Shot.Making_Player 6`,
+    diff_Shot.Making_Player_7 = `diff_Shot.Making_Player 7`,
+    diff_Shot.Making_Player_8 = `diff_Shot.Making_Player 8`,
+    diff_SQ.PPP_Player_1 = `diff_SQ.PPP_Player 1`,
+    diff_SQ.PPP_Player_2 = `diff_SQ.PPP_Player 2`,
+    diff_SQ.PPP_Player_3 = `diff_SQ.PPP_Player 3`,
+    diff_SQ.PPP_Player_4 = `diff_SQ.PPP_Player 4`,
+    diff_SQ.PPP_Player_5 = `diff_SQ.PPP_Player 5`,
+    diff_SQ.PPP_Player_6 = `diff_SQ.PPP_Player 6`,
+    diff_SQ.PPP_Player_7 = `diff_SQ.PPP_Player 7`,
+    diff_SQ.PPP_Player_8 = `diff_SQ.PPP_Player 8`
+  )
+```
+
+
+# XG Boost
+In the code below, we split the dataset into a training (70%) and test set (30%)
+
+```{r}
+
+set.seed(11111)
+sample <- sample.split(james_naismith_diff2$team_winner, SplitRatio = 0.7)
+march_train <- subset(james_naismith_diff2, sample == TRUE)
+march_test  <- subset(james_naismith_diff2, sample == FALSE)
+
+
+
+
+```
+
+```{r}
+dtrain <- xgb.DMatrix(data = as.matrix(march_train[,-c(1:4)]), label = as.numeric(march_train$team_winner))
+
+# Create test matrix
+
+
+
+dtest <-  xgb.DMatrix(data = as.matrix(march_test[,-c(1:4)]), label = as.numeric(march_test$team_winner))
+```
+
+```{r}
+set.seed(111111)
+bst_1 <- xgboost(data = dtrain, # Set training data
+               
+               nrounds = 100, # Set number of rounds
+               objective = "binary:logistic",
+               eval_metric = "error", 
+               eval_metric = "auc",
+               verbose = 1, # 1 - Prints out fit
+                print_every_n = 20) # Prints out result every 20th iteration
+```
+
+```{r}
+set.seed(111111)
+bst <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+               eta = 0.1, # Set learning rate
+              
+               nrounds = 1000, # Set number of rounds
+               early_stopping_rounds = 50,
+               objective = "binary:logistic",
+               eval_metric = "error", 
+               eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+               
+               verbose = 1, # 1 - Prints out fit
+               nthread = 1, # Set number of parallel threads
+               print_every_n = 20) # Prints out result every 20th iteration
+```
+
+From this we see 77 was the optimal number of iterations for our model. We use this number solely to ensure that we are doing a sufficient amount of rounds for our next tuning stages. We will set the number of iterations to 100 and include an early stop parameter of 20 for our next round of tuning.
+
+```{r}
+max_depth_vals <- c(3, 5, 7, 10, 15) # Create vector of max depth values
+min_child_weight <- c(1,3,5,7, 10, 15) # Create vector of min child values
+
+# Expand grid of parameter values
+cv_params <- expand.grid(max_depth_vals, min_child_weight)
+names(cv_params) <- c("max_depth", "min_child_weight")
+# Create results vector
+rmse_vec  <- rep(NA, nrow(cv_params)) 
+# Loop through results
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = dtrain, # Set training data
+                     
+                     nfold = 5, # Use 5 fold cross-validation
+                     
+                     eta = 0.1, # Set learning rate
+                     max.depth = cv_params$max_depth[i], # Set max depth
+                     min_child_weight = cv_params$min_child_weight[i], # Set minimum number of samples in node to split
+                     
+                     
+                     nrounds = 1000, # Set number of rounds
+                     early_stopping_rounds = 50,
+                     objective = "binary:logistic",
+                     eval_metric = "error", 
+                     eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                     
+                     verbose = 1, # 1 - Prints out fit
+                     nthread = 1, # Set number of parallel threads
+                     print_every_n = 20 # Prints out result every 20th iteration
+                     
+  ) # Set evaluation metric to use
+  
+  rmse_vec[i] <- bst_tune$evaluation_log$test_auc_mean[bst_tune$best_ntreelimit]
+  
+  
+}
+```
+Best is 49:
+
+```{r}
+# Join results in dataset
+res_db <- cbind.data.frame(cv_params, rmse_vec)
+names(res_db)[3] <- c("auc") 
+res_db$max_depth <- as.factor(res_db$max_depth) # Convert tree number to factor for plotting
+res_db$min_child_weight <- as.factor(res_db$min_child_weight) # Convert node size to factor for plotting
+# Print AUC heatmap
+g_2 <- ggplot(res_db, aes(y = max_depth, x = min_child_weight, fill = auc)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+                       mid = "white", # Choose mid color
+                       high = "red", # Choose high color
+                       midpoint =mean(res_db$auc), # Choose mid point
+                       space = "Lab", 
+                       na.value ="grey", # Choose NA value
+                       guide = "colourbar", # Set color bar
+                       aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Minimum Child Weight", y = "Max Depth", fill = "AUC") # Set labels
+g_2 # Generate plot
+```
+
+```{r}
+res_db[which.max(res_db$auc),] 
+```
+
+```{r}
+gamma_vals <- c(0, 0.05, 0.1, 0.15, 0.2) # Create vector of gamma values
+
+# Be Careful - This can take a very long time to run
+set.seed(111111)
+rmse_vec  <- rep(NA, length(gamma_vals))
+for(i in 1:length(gamma_vals)){
+  bst_tune <- xgb.cv(data = dtrain, # Set training data
+                     
+                     nfold = 5, # Use 5 fold cross-validation
+                     
+                     eta = 0.1, # Set learning rate
+                     max.depth = 3, # Set max depth
+                     min_child_weight = 3, # Set minimum number of samples in node to split
+                     gamma = gamma_vals[i], # Set minimum loss reduction for split
+                     
+                     
+                     
+                     nrounds = 1000, # Set number of rounds
+                     early_stopping_rounds = 50,
+                     objective = "binary:logistic",
+                     eval_metric = "error", 
+                     eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                     
+                     verbose = 1, # 1 - Prints out fit
+                     nthread = 1, # Set number of parallel threads
+                     print_every_n = 20 # Prints out result every 20th iteration
+  ) # Set evaluation metric to use
+  
+  
+  rmse_vec[i] <- bst_tune$evaluation_log$test_auc_mean[bst_tune$best_ntreelimit]
+}
+```
+best 164
+
+
+```{r}
+cbind.data.frame(gamma_vals, rmse_vec)
+```
+
+```{r}
+###### 3 - Subsample and Column sample Tuning ######
+
+# Be Careful - This can take a very long time to run
+subsample <- c(0.6, 0.7, 0.8, 0.9, 1) # Create vector of subsample values
+colsample_by_tree <- c(0.6, 0.7, 0.8, 0.9, 1) # Create vector of col sample values
+
+# Expand grid of tuning parameters
+cv_params <- expand.grid(subsample, colsample_by_tree)
+names(cv_params) <- c("subsample", "colsample_by_tree")
+# Create vectors to store results
+rmse_vec <- rep(NA, nrow(cv_params)) 
+# Loop through parameter values
+for(i in 1:nrow(cv_params)){
+  set.seed(111111)
+  bst_tune <- xgb.cv(data = dtrain, # Set training data
+                     
+                     nfold = 5, # Use 5 fold cross-validation
+                     
+                     eta = 0.1, # Set learning rate
+                     max.depth = 3, # Set max depth
+                     min_child_weight = 3, # Set minimum number of samples in node to split
+                     gamma = 0.15, # Set minimum loss reduction for split
+                     subsample = cv_params$subsample[i], # Set proportion of training data to use in tree
+                     colsample_bytree = cv_params$colsample_by_tree[i], # Set number of variables to use in each tree
+                     
+                     nrounds = 1000, # Set number of rounds
+                     early_stopping_rounds = 50,
+                     objective = "binary:logistic",
+                     eval_metric = "error", 
+                     eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                     
+                     verbose = 1, # 1 - Prints out fit
+                     nthread = 1, # Set number of parallel threads
+                     print_every_n = 20 # Prints out result every 20th iteration
+  ) # Set evaluation metric to use
+  
+  
+  rmse_vec[i] <- bst_tune$evaluation_log$test_auc_mean[bst_tune$best_ntreelimit]
+  
+  
+}
+```
+
+165
+
+```{r}
+res_db <- cbind.data.frame(cv_params, rmse_vec)
+names(res_db)[3] <- c("auc") 
+res_db$subsample <- as.factor(res_db$subsample) # Convert tree number to factor for plotting
+res_db$colsample_by_tree <- as.factor(res_db$colsample_by_tree) # Convert node size to factor for plotting
+g_4 <- ggplot(res_db, aes(y = colsample_by_tree, x = subsample, fill = auc)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+                       mid = "white", # Choose mid color
+                       high = "red", # Choose high color
+                       midpoint =mean(res_db$auc), # Choose mid point
+                       space = "Lab", 
+                       na.value ="grey", # Choose NA value
+                       guide = "colourbar", # Set color bar
+                       aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Subsample", y = "Column Sample by Tree", fill = "auc") # Set labels
+g_4 # Generate plot
+```
+
+
+```{r}
+res_db
+```
+
+
+```{r}
+res_db[which.max(res_db$auc),]
+```
+
+```{r}
+# Use xgb.cv to run cross-validation inside xgboost
+set.seed(111111)
+bst_mod_1 <- xgb.cv(data = dtrain, # Set training data
+                    
+                    nfold = 5, # Use 5 fold cross-validation
+                    
+                    eta = 0.3, # Set learning rate
+                    max.depth = 3, # Set max depth
+                    min_child_weight = 3, # Set minimum number of samples in node to split
+                    gamma = .15, # Set minimum loss reduction for split
+                    subsample = .6, # Set proportion of training data to use in tree
+                    colsample_bytree =  .6, # Set number of variables to use in each tree
+                    
+                    nrounds = 1000, # Set number of rounds
+                    early_stopping_rounds = 50, 
+                    objective = "binary:logistic",
+                    eval_metric = "error", 
+                    eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                    
+                    verbose = 1, # 1 - Prints out fit
+                    nthread = 1, # Set number of parallel threads
+                    print_every_n = 20 # Prints out result every 20th i
+)
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_2 <- xgb.cv(data = dtrain, # Set training data
+                    
+                    nfold = 5, # Use 5 fold cross-validation
+                    
+                    eta = 0.1, # Set learning rate
+                    max.depth =  3, # Set max depth
+                    min_child_weight = 3, # Set minimum number of samples in node to split
+                    gamma = .15, # Set minimum loss reduction for split
+                    subsample = .6, # Set proportion of training data to use in tree
+                    colsample_bytree = .6, # Set number of variables to use in each tree
+                    
+                    nrounds = 1000, # Set number of rounds
+                    early_stopping_rounds = 50,
+                    objective = "binary:logistic",
+                    eval_metric = "error", 
+                    eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                    
+                    verbose = 1, # 1 - Prints out fit
+                    nthread = 1, # Set number of parallel threads
+                    print_every_n = 20 # Prints out result every 20th iteration
+) # Set evaluation metric to use
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_3 <- xgb.cv(data = dtrain, # Set training data
+                    
+                    nfold = 5, # Use 5 fold cross-validation
+                    
+                    eta = 0.05, # Set learning rate
+                    max.depth = 3, # Set max depth
+                    min_child_weight = 3, # Set minimum number of samples in node to split
+                    gamma = .15, # Set minimum loss reduction for split
+                    subsample = .6 , # Set proportion of training data to use in tree
+                    colsample_bytree =  .6, # Set number of variables to use in each tree
+                    
+                    nrounds = 1000, # Set number of rounds
+                    early_stopping_rounds = 50,
+                    objective = "binary:logistic",
+                    eval_metric = "error", 
+                    eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                    
+                    verbose = 1, # 1 - Prints out fit
+                    nthread = 1, # Set number of parallel threads
+                    print_every_n = 20 # Prints out result every 20th iteration
+) # Set evaluation metric to use
+```
+
+
+
+```{r}
+set.seed(111111)
+bst_mod_4 <- xgb.cv(data = dtrain, # Set training data
+                    
+                    nfold = 5, # Use 5 fold cross-validation
+                    
+                    eta = 0.01, # Set learning rate
+                    max.depth = 3, # Set max depth
+                    min_child_weight = 3, # Set minimum number of samples in node to split
+                    gamma = 0.15, # Set minimum loss reduction for split
+                    subsample = .6, # Set proportion of training data to use in tree
+                    colsample_bytree = .6, # Set number of variables to use in each tree
+                    
+                    nrounds = 1000, # Set number of rounds
+                    early_stopping_rounds = 50,
+                    objective = "binary:logistic",
+                    eval_metric = "error", 
+                    eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                    
+                    verbose = 1, # 1 - Prints out fit
+                    nthread = 1, # Set number of parallel threads
+                    print_every_n = 20 # Prints out result every 20th iteration
+) # Set evaluation metric to use
+```
+
+
+
+```{r}
+set.seed(111111)
+bst_mod_5 <- xgb.cv(data = dtrain, # Set training data
+                    
+                    nfold = 5, # Use 5 fold cross-validation
+                    
+                    eta = 0.005, # Set learning rate
+                    max.depth = 3, # Set max depth
+                    min_child_weight = 3, # Set minimum number of samples in node to split
+                    gamma = .15, # Set minimum loss reduction for split
+                    subsample = .6 , # Set proportion of training data to use in tree
+                    colsample_bytree = .6, # Set number of variables to use in each tree
+                    
+                    nrounds = 1000, # Set number of rounds
+                    early_stopping_rounds = 50,
+                    objective = "binary:logistic",
+                    eval_metric = "error", 
+                    eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                    
+                    verbose = 1, # 1 - Prints out fit
+                    nthread = 1, # Set number of parallel threads
+                    print_every_n = 20 # Prints out result every 20th iteration
+                    
+) # Set evaluation metric to use
+```
+
+```{r}
+# Extract results for model with eta = 0.3
+pd1 <- cbind.data.frame(bst_mod_1$evaluation_log[,c("iter", "test_error_mean")], rep(0.3, nrow(bst_mod_1$evaluation_log)))
+names(pd1)[3] <- "eta"
+# Extract results for model with eta = 0.1
+pd2 <- cbind.data.frame(bst_mod_2$evaluation_log[,c("iter", "test_error_mean")], rep(0.1, nrow(bst_mod_2$evaluation_log)))
+names(pd2)[3] <- "eta"
+# Extract results for model with eta = 0.05
+pd3 <- cbind.data.frame(bst_mod_3$evaluation_log[,c("iter", "test_error_mean")], rep(0.05, nrow(bst_mod_3$evaluation_log)))
+names(pd3)[3] <- "eta"
+# Extract results for model with eta = 0.01
+pd4 <- cbind.data.frame(bst_mod_4$evaluation_log[,c("iter", "test_error_mean")], rep(0.01, nrow(bst_mod_4$evaluation_log)))
+names(pd4)[3] <- "eta"
+# Extract results for model with eta = 0.005
+pd5 <- cbind.data.frame(bst_mod_5$evaluation_log[,c("iter", "test_error_mean")], rep(0.005, nrow(bst_mod_5$evaluation_log)))
+names(pd5)[3] <- "eta"
+# Join datasets
+plot_data <- rbind.data.frame(pd1, pd2, pd3, pd4, pd5)
+# Converty ETA to factor
+plot_data$eta <- as.factor(plot_data$eta)
+# Plot points
+g_6 <- ggplot(plot_data, aes(x = iter, y = test_error_mean, color = eta))+
+  geom_point(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error rate v Number of Trees",
+       y = "Error Rate", color = "Learning \n Rate")  # Set labels
+g_6
+```
+
+
+```{r}
+set.seed(111111)
+bst_final <- xgboost(data = dtrain, # Set training data
+                     
+                     
+                     
+                     eta = .01, # Set learning rate
+                     max.depth =  3, # Set max depth
+                     min_child_weight = 3, # Set minimum number of samples in node to split
+                     gamma = .15, # Set minimum loss reduction for split
+                     subsample = .6, # Set proportion of training data to use in tree
+                     colsample_bytree = .6, # Set number of variables to use in each tree
+                     
+                     nrounds = 1000, # Set number of rounds
+                     early_stopping_rounds = 50,
+                     objective = "binary:logistic",
+                     eval_metric = "error", 
+                     eval_metric = "auc",# Set number of rounds to stop at if there is no improvement
+                     
+                     verbose = 1, # 1 - Prints out fit
+                     nthread = 1, # Set number of parallel threads
+                     print_every_n = 20 # Prints out result every 20th iteration
+                     
+) # Set evaluation metric to use
+```
+
+These are the most important differential metrics for winning games and losing games in March Madness.
+
+```{r}
+# Extract importance
+imp_mat <- xgb.importance(model = bst_final)
+# Plot importance (top 10 variables)
+xgb.plot.importance(imp_mat, top_n = 25)
+```
+
+
+```{r}
+# Load SHAP functions
+source("a_insights_shap_functions.r")
+
+```
+
+```{r}
+# Calculate SHAP importance
+shap_result_1 <- shap.score.rank(xgb_model = bst_final, 
+                X_train = as.matrix(march_train[,-c(1:4)]),
+                shap_approx = F)
+## Loading required package: data.table
+## Warning: package 'data.table' was built under R version 4.1.3
+## make SHAP score by decreasing order
+# Calculate data for SHAP plot
+shap_long_1 = shap.prep(shap = shap_result_1,
+                           X_train = as.matrix(march_train[,-c(1:4)]), 
+                           top_n = 25)
+
+
+```
+
+
+```{r}
+plot.shap.summary(data_long = shap_long_1)
+```
+
+
+```{r}
+# Generate predictions on the test set
+pred_probs <- predict(bst_final, dtest)
+
+test_labels <- getinfo(dtest, "label")
+
+roc_obj <- roc(test_labels, pred_probs)
+
+# Print AUC score
+auc_score <- auc(roc_obj)
+print(paste("AUC:", round(auc_score, 4)))
+
+# Plot ROC curve
+plot(roc_obj, col = "blue", main = "ROC Curve for XGBoost Model")
+```
+
+
+```{r}
+# Save the model
+# xgb.save(bst_final, "march_madnessxg_sq.model")
+
+bst_final <- xgb.load("march_madnessxg_sq.model")
+
+```
+
+Filter for the 2025 metrics at the time of the games for today
+
+```{r}
+mm25 <- metrics %>%
+  filter(YEAR == 2025)
+
+mm25 <- mm25 %>%
+  dplyr::rename(dbpr_Player.1 = `dbpr_Player 1`,
+                dbpr_Player.2 = `dbpr_Player 2`,
+                dbpr_Player.3 = `dbpr_Player 3`,
+                dbpr_Player.4 = `dbpr_Player 4`,
+                dbpr_Player.5 = `dbpr_Player 5`,
+                dbpr_Player.6 = `dbpr_Player 6`,
+                dbpr_Player.7 = `dbpr_Player 7`,
+                dbpr_Player.8 = `dbpr_Player 8`,
+                obpr_Player.1 = `obpr_Player 1`,
+                obpr_Player.2 = `obpr_Player 2`,
+                obpr_Player.3 = `obpr_Player 3`,
+                obpr_Player.4 = `obpr_Player 4`,
+                obpr_Player.5 = `obpr_Player 5`,
+                obpr_Player.6 = `obpr_Player 6`,
+                obpr_Player.7 = `obpr_Player 7`,
+                obpr_Player.8 = `obpr_Player 8`)
+
+
+```
+
+This function, `prepare_features`, calculates the matchup-level differential features between two NCAA teams based on a wide range of team-level and player-level metrics. It takes in two team names and a dataset (`mm25`) and returns a single-row dataframe containing the differences in efficiency metrics, playtype frequencies and efficiencies, and player impact statistics (such as BPR, Shot Quality, and Shot Making) between the two teams. These engineered features are then used as input to the XGBoost model to predict game outcomes.
+
+
+```{r}
+prepare_features <- function(team1, team2, mm25) {
+  team1_data <- mm25[mm25$TEAM == team1, ]
+  team2_data <- mm25[mm25$TEAM == team2, ]
+
+  data.frame(
+    diff_EFG_O = team1_data$EFG_O - team2_data$EFG_O,
+    diff_EFG_D = team1_data$EFG_D - team2_data$EFG_D,
+    diff_FTR = team1_data$FTR - team2_data$FTR,
+    diff_FTRD = team1_data$FTRD - team2_data$FTRD,
+    diff_ORB = team1_data$ORB - team2_data$ORB,
+    diff_DRB = team1_data$DRB - team2_data$DRB,
+    diff_TOR = team1_data$TOR - team2_data$TOR,
+    diff_TORD = team1_data$TORD - team2_data$TORD,
+    diff_X2P_O = team1_data$X2P_O - team2_data$X2P_O,
+    diff_X3P_O = team1_data$X3P_O - team2_data$X3P_O,
+    diff_X2P_D = team1_data$X2P_D - team2_data$X2P_D,
+    diff_X3P_D = team1_data$X3P_D - team2_data$X3P_D,
+    diff_dbpr_Player_1 = team1_data$dbpr_Player.1 - team2_data$dbpr_Player.1,
+    diff_dbpr_Player_2 = team1_data$dbpr_Player.2 - team2_data$dbpr_Player.2,
+    diff_dbpr_Player_3 = team1_data$dbpr_Player.3 - team2_data$dbpr_Player.3,
+    diff_dbpr_Player_4 = team1_data$dbpr_Player.4 - team2_data$dbpr_Player.4,
+    diff_dbpr_Player_5 = team1_data$dbpr_Player.5 - team2_data$dbpr_Player.5,
+    diff_dbpr_Player_6 = team1_data$dbpr_Player.6 - team2_data$dbpr_Player.6,
+    diff_dbpr_Player_7 = team1_data$dbpr_Player.7 - team2_data$dbpr_Player.7,
+    diff_dbpr_Player_8 = team1_data$dbpr_Player.8 - team2_data$dbpr_Player.8,
+    diff_obpr_Player_1 = team1_data$obpr_Player.1 - team2_data$obpr_Player.1,
+    diff_obpr_Player_2 = team1_data$obpr_Player.2 - team2_data$obpr_Player.2,
+    diff_obpr_Player_3 = team1_data$obpr_Player.3 - team2_data$obpr_Player.3,
+    diff_obpr_Player_4 = team1_data$obpr_Player.4 - team2_data$obpr_Player.4,
+    diff_obpr_Player_5 = team1_data$obpr_Player.5 - team2_data$obpr_Player.5,
+    diff_obpr_Player_6 = team1_data$obpr_Player.6 - team2_data$obpr_Player.6,
+    diff_obpr_Player_7 = team1_data$obpr_Player.7 - team2_data$obpr_Player.7,
+    diff_obpr_Player_8 = team1_data$obpr_Player.8 - team2_data$obpr_Player.8,
+    diff_Rim_and_3_rate = team1_data$Rim_and_3_rate - team2_data$Rim_and_3_rate,
+    diff_X3PT.Frequency = team1_data$X3PT.Frequency - team2_data$X3PT.Frequency,
+    diff_X3PT.SQ.PPP = team1_data$X3PT.SQ.PPP - team2_data$X3PT.SQ.PPP,
+    diff_Catch...Shoot.3PT.Frequency = team1_data$Catch...Shoot.3PT.Frequency - team2_data$Catch...Shoot.3PT.Frequency,
+    diff_Catch...Shoot.3PT.SQ.PPP = team1_data$Catch...Shoot.3PT.SQ.PPP - team2_data$Catch...Shoot.3PT.SQ.PPP,
+    diff_Cut.Frequency = team1_data$Cut.Frequency - team2_data$Cut.Frequency,
+    diff_Cut.SQ.PPP = team1_data$Cut.SQ.PPP - team2_data$Cut.SQ.PPP,
+    diff_Finishing.at.the.Rim.Frequency = team1_data$Finishing.at.the.Rim.Frequency - team2_data$Finishing.at.the.Rim.Frequency,
+    diff_Finishing.at.the.Rim.SQ.PPP = team1_data$Finishing.at.the.Rim.SQ.PPP - team2_data$Finishing.at.the.Rim.SQ.PPP,
+    diff_Half.Court.Frequency = team1_data$Half.Court.Frequency - team2_data$Half.Court.Frequency,
+    diff_Half.Court.SQ.PPP = team1_data$Half.Court.SQ.PPP - team2_data$Half.Court.SQ.PPP,
+    diff_Isolation.Frequency = team1_data$Isolation.Frequency - team2_data$Isolation.Frequency,
+    diff_Isolation.SQ.PPP = team1_data$Isolation.SQ.PPP - team2_data$Isolation.SQ.PPP,
+    diff_Midrange.Frequency = team1_data$Midrange.Frequency - team2_data$Midrange.Frequency,
+    diff_Midrange.SQ.PPP = team1_data$Midrange.SQ.PPP - team2_data$Midrange.SQ.PPP,
+    diff_Off.the.Dribble.3PT.Frequency = team1_data$Off.the.Dribble.3PT.Frequency - team2_data$Off.the.Dribble.3PT.Frequency,
+    diff_Off.the.Dribble.3PT.SQ.PPP = team1_data$Off.the.Dribble.3PT.SQ.PPP - team2_data$Off.the.Dribble.3PT.SQ.PPP,
+    diff_Off.Screen.Frequency = team1_data$Off.Screen.Frequency - team2_data$Off.Screen.Frequency,
+    diff_Off.Screen.SQ.PPP = team1_data$Off.Screen.SQ.PPP - team2_data$Off.Screen.SQ.PPP,
+    diff_P.R.Ball.Screen.Frequency = team1_data$P.R.Ball.Screen.Frequency - team2_data$P.R.Ball.Screen.Frequency,
+    diff_P.R.Ball.Screen.SQ.PPP = team1_data$P.R.Ball.Screen.SQ.PPP - team2_data$P.R.Ball.Screen.SQ.PPP,
+    diff_Post.Up.Frequency = team1_data$Post.Up.Frequency - team2_data$Post.Up.Frequency,
+    diff_Post.Up.SQ.PPP = team1_data$Post.Up.SQ.PPP - team2_data$Post.Up.SQ.PPP,
+    diff_Transition.Frequency = team1_data$Transition.Frequency - team2_data$Transition.Frequency,
+    diff_Transition.SQ.PPP = team1_data$Transition.SQ.PPP - team2_data$Transition.SQ.PPP,
+    diff_SQ.PPP_Player_1 = team1_data$`SQ.PPP_Player 1` - team2_data$`SQ.PPP_Player 1`,
+    diff_SQ.PPP_Player_2 = team1_data$`SQ.PPP_Player 2` - team2_data$`SQ.PPP_Player 2`,
+    diff_SQ.PPP_Player_3 = team1_data$`SQ.PPP_Player 3` - team2_data$`SQ.PPP_Player 3`,
+    diff_SQ.PPP_Player_4 = team1_data$`SQ.PPP_Player 4` - team2_data$`SQ.PPP_Player 4`,
+    diff_SQ.PPP_Player_5 = team1_data$`SQ.PPP_Player 5` - team2_data$`SQ.PPP_Player 5`,
+    diff_SQ.PPP_Player_6 = team1_data$`SQ.PPP_Player 6` - team2_data$`SQ.PPP_Player 6`,
+    diff_SQ.PPP_Player_7 = team1_data$`SQ.PPP_Player 7` - team2_data$`SQ.PPP_Player 7`,
+    diff_SQ.PPP_Player_8 = team1_data$`SQ.PPP_Player 8` - team2_data$`SQ.PPP_Player 8`,
+    diff_Good_Possession_Rate_Player_1 = team1_data$`Good_Possession_Rate_Player 1` - team2_data$`Good_Possession_Rate_Player 1`,
+    diff_Good_Possession_Rate_Player_2 = team1_data$`Good_Possession_Rate_Player 2` - team2_data$`Good_Possession_Rate_Player 2`,
+    diff_Good_Possession_Rate_Player_3 = team1_data$`Good_Possession_Rate_Player 3` - team2_data$`Good_Possession_Rate_Player 3`,
+    diff_Good_Possession_Rate_Player_4 = team1_data$`Good_Possession_Rate_Player 4` - team2_data$`Good_Possession_Rate_Player 4`,
+    diff_Good_Possession_Rate_Player_5 = team1_data$`Good_Possession_Rate_Player 5` - team2_data$`Good_Possession_Rate_Player 5`,
+    diff_Good_Possession_Rate_Player_6 = team1_data$`Good_Possession_Rate_Player 6` - team2_data$`Good_Possession_Rate_Player 6`,
+    diff_Good_Possession_Rate_Player_7 = team1_data$`Good_Possession_Rate_Player 7` - team2_data$`Good_Possession_Rate_Player 7`,
+    diff_Good_Possession_Rate_Player_8 = team1_data$`Good_Possession_Rate_Player 8` - team2_data$`Good_Possession_Rate_Player 8`,
+    diff_Shot.Making_Player_1 = team1_data$`Shot.Making_Player 1` - team2_data$`Shot.Making_Player 1`,
+    diff_Shot.Making_Player_2 = team1_data$`Shot.Making_Player 2` - team2_data$`Shot.Making_Player 2`,
+    diff_Shot.Making_Player_3 = team1_data$`Shot.Making_Player 3` - team2_data$`Shot.Making_Player 3`,
+    diff_Shot.Making_Player_4 = team1_data$`Shot.Making_Player 4` - team2_data$`Shot.Making_Player 4`,
+    diff_Shot.Making_Player_5 = team1_data$`Shot.Making_Player 5` - team2_data$`Shot.Making_Player 5`,
+    diff_Shot.Making_Player_6 = team1_data$`Shot.Making_Player 6` - team2_data$`Shot.Making_Player 6`,
+    diff_Shot.Making_Player_7 = team1_data$`Shot.Making_Player 7` - team2_data$`Shot.Making_Player 7`,
+    diff_Shot.Making_Player_8 = team1_data$`Shot.Making_Player 8` - team2_data$`Shot.Making_Player 8`
+  )
+}
+
+
+```
+
+   
+This simulation function models the outcome of a hypothetical NCAA championship game between two selected teams using the trained XGBoost model. It runs the simulation 10,000 times, each time comparing the model-predicted win probability against a randomly drawn number to simulate real-game randomness. The function calculates how often each team would win based on matchup-specific features (created using `prepare_features`) and returns win counts and probabilities for both teams. This allows us to estimate the true likelihood of one team beating another in a high-stakes game like the national title.
+
+```{r}
+# Function to simulate the championship game between two teams
+simulate_championship <- function(team1, team2, bst_final, mm25, num_simulations = 10000) {
+    # Initialize counters for team wins
+    team1_wins <- 0
+    team2_wins <- 0
+    
+    # Simulate the championship game `num_simulations` times
+    for (x in 1:num_simulations) {
+        set.seed(x + 5882300)  # Ensure reproducibility
+        
+        # Prepare the features for the selected teams
+        features <- prepare_features(team1, team2, mm25)
+        
+        # Convert to xgb.DMatrix
+        dtest <- xgb.DMatrix(data = as.matrix(features))
+        
+        # Get the prediction from the XGBoost model
+        pred <- predict(bst_final, dtest)
+        
+        # Simulate the outcome
+        sim <- runif(1)
+        if (pred >= sim) {
+            team1_wins <- team1_wins + 1
+        } else {
+            team2_wins <- team2_wins + 1
+        }
+    }
+    
+    # Return the results
+    list(
+        team1 = team1,
+        team2 = team2,
+        team1_wins = team1_wins,
+        team2_wins = team2_wins,
+        team1_win_prob = team1_wins / num_simulations,
+        team2_win_prob = team2_wins / num_simulations
+    )
+}
+
+
+today2 <- hoopR::load_mbb_schedule(seasons = most_recent_mbb_season())
+
+today <- today2 %>%
+  filter(
+    game_date %in% c("2025-03-29", "2025-03-30") &
+      str_detect(notes_headline, "Men's Basketball Championship")
+  ) %>%
+  dplyr::slice(n():1)
+
+
+today <- today %>%
+  select(home_location, away_location) 
+
+# Specify the two teams for the championship
+team1 <- "Florida"  # Replace with your first team
+team2 <- "Houston"  # Replace with your second team
+
+# Simulate the championship game
+championship_results <- simulate_championship(team1, team2, bst_final, mm25)
+
+
+print(championship_results)
+
+```
+
+This block of code automates the simulation of multiple NCAA tournament games occurring on a given day. It loops through each matchup listed in the `today` dataframe — which contains the schedule for upcoming championship weekend games — and runs 10,000 simulations for each matchup using the `simulate_championship` function. The function checks if both teams exist in the model’s dataset (`mm25`) and stores either the simulated win probabilities or `NA` if data is missing. After running all simulations, the results are compiled into a single dataframe that includes the predicted win percentages for both the home and away teams. This enables bulk simulation and matchup forecasting across the entire slate of games.
+
+
+```{r}
+# Initialize a list to store the results for each matchup  
+results <- list()
+
+# Loop through each row of the "today" dataframe
+for (i in 1:nrow(today)) {
+  # Extract home and away team names for the current row
+  team1 <- today$home_location[i]
+  team2 <- today$away_location[i]
+  print(i )
+  # Check if both teams exist in mm25
+  if (team1 %in% mm25$TEAM & team2 %in% mm25$TEAM) {
+    # Simulate the game using the simul ate_championship function
+    results[[i]] <- simulate_championship(team1, team2, bst_final, mm25)
+  } else {
+    # If one or both teams are missing, skip the game
+    results[[i]] <- data.frame(
+      team1 = team1,
+      team2 = team2,
+      team1_wins = NA,
+      team2_wins = NA,
+      team1_win_prob = NA,
+      team2_win_prob = NA
+    )
+  }
+}
+
+# Combine all results into a dataframe for easier analysis
+final_results <- do.call(rbind, lapply(seq_along(results), function(i) {
+  data.frame(results[[i]])
+}))
+
+final_results <- final_results %>%
+  mutate(home_percentage = team1_win_prob * 100,
+         away_percentage = team2_win_prob * 100)
+
+```
+
+This section adds a real-world betting context to the model's simulated win probabilities by converting them into approximate moneyline odds. First, it scrapes a win percentage–to–moneyline conversion table from BoydsBets.com using `rvest`. For each simulated matchup, it selects either the home or away team’s predicted win percentage (whichever is ≥ 50%) and matches it to the closest value in the scraped table. The corresponding moneyline is then attached as a new column, `suggested_odds`, which provides an interpretable betting line approximation for each simulated result. This helps translate model probabilities into actionable metrics familiar to bettors and analysts.
+
+
+
+```{r}
+
+
+# URL of the webpage
+url <- "https://www.boydsbets.com/college-basketball-spread-to-moneyline-conversion/"
+
+# Read the webpage
+webpage <- read_html(url)
+
+# Extract the table and name it 'ml_odds'
+ml_odds <- webpage %>%
+  html_node("div.widetable") %>%  # Select the table using its class
+  html_table()
+
+# Convert to a dataframe
+ml_odds <- as.data.frame(ml_odds)
+
+ml_odds$`Fav Win %` <- as.numeric(gsub("%", "", ml_odds$`Fav Win %`))
+
+final_results2 <- final_results %>%
+  mutate(
+    # Determine which percentage to use (home or away)
+    percentage_to_match = ifelse(home_percentage >= 50, home_percentage, away_percentage),
+    
+    # Find the closest row and get suggested odds using sapply
+    suggested_odds = sapply(percentage_to_match, function(x) {
+      closest_row <- which.min(abs(ml_odds$`Fav Win %` - x))
+      ml_odds$Line[closest_row]
+    })
+  )
+  # Ungroup after rowwise
+
+final_results2 <- final_results2 %>%
+  filter(!is.na(home_percentage))
+
+final_results3 <- final_results2 %>%
+  select(team1, team2, home_percentage, away_percentage, suggested_odds)
+
+
+```
+
+
+# Future Steps and Visuals
+
+```{r}
+s16_players <- sq_players %>%
+  filter(YEAR == 2025) %>%
+  filter( Team == "Notre Dame") 
+
+s16_players <- sq_players %>%
+  filter(YEAR == 2025)
+
+viz_teams <- espn_mbb_teams(year = most_recent_mbb_season())
+
+s16_players$Team <- str_replace_all(s16_players$Team, "Mississippi", "Ole Miss")
+s16_players$Team <- str_replace_all(s16_players$Team, "Michigan St.", "Michigan State")
+
+s16_players <- s16_players %>%
+  left_join(viz_teams, by = c("Team" = "team"))
+
+s16_players <- s16_players %>%
+  mutate(color = ifelse(substr(alternate_color, 1, 1) == "#", alternate_color, paste0("#", alternate_color)),
+         alternate_color = ifelse(substr(color, 1, 1) == "#", color, paste0("#", color)))
+
+library(ggrepel)
+
+labeled_players <- s16_players %>%
+  filter( (SQ.PPP > 1.3 | SQ.PPP < .90) )
+
+ggplot(s16_players, aes(x = SQ.PPP, y = Shot.Making)) +
+  geom_image(aes(image = logo), size = 0.075) +  # Add team logo to each point
+  geom_label_repel(
+    data = s16_players,
+    aes(label = Players),
+    size = 2.5,
+    color = "black",
+    fill = "#f4e7da",       # Light beige background for label box
+    box.padding = 0.1,      # Space between label and point
+    label.padding = 0.1,    # Padding inside the label box
+    label.size = 0.05,
+    max.overlaps = 35# Border thickness around label bo     # No line pointing to logo
+  ) +  # Clean label
+  theme_minimal() +
+  labs(
+    title = "Shot Quality vs Shot Making for Sweet 16 Players",
+    x = "Shot Quality (SQ.PPP)",
+    y = "Shot Making"
+  ) +
+  theme(
+    panel.background = element_rect(fill = "white", color = "black", size = 1.2),
+    plot.background = element_rect(fill = "white"),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+```
+
+```{r}
+ggsave("SQ_SWEET16.png", width = 10, height = 6, dpi = 300)
+```
+
+
+
+```{r}
+transfer_portal <- read.csv("transfer_portal.csv")
+
+transfer_portal <- transfer_portal %>%
+  dplyr::mutate(
+    name = name %>%
+      str_to_lower() %>%                                 
+      str_replace_all("[-'.]", "") %>%                  
+      str_remove_all("\\b(jr|ii|iii|iv|sr)\\b") %>%       
+      str_squish()                                       
+  )
+
+sq_players2025_pt2 <- sq_players2025 %>%
+  dplyr::mutate(
+    Players = Players %>%
+      str_to_lower() %>%                                 
+      str_replace_all("[-'.]", "") %>%                  
+      str_remove_all("\\b(jr|ii|iii|iv|sr)\\b") %>%       
+      str_squish()                                       
+  )
+
+sq_transfer <- merge(sq_players2025_pt2, transfer_portal, by.x = c("Players"), by.y = c("name"))
+
+unmatched_names <- anti_join(transfer_portal, sq_transfer, by = c("name" = "Players"))
+
+sq_transfer$Team <- str_replace_all(sq_transfer$Team, "St.", "State")
+
+sq_transfer <- sq_transfer %>%
+  left_join(viz_teams, by = c("Team" = "team"))
+
+sq_transfer <- sq_transfer %>%
+  mutate(color = ifelse(substr(alternate_color, 1, 1) == "#", alternate_color, paste0("#", alternate_color)),
+         alternate_color = ifelse(substr(color, 1, 1) == "#", color, paste0("#", color)))
+
+
+viz_teams <- espn_mbb_teams(year = most_recent_mbb_season())
+
+
+labeled_players <- sq_transfer %>%
+  filter(
+    (SQ.PPP > 1.25 | SQ.PPP < 0.90) |
+    Players %in% c("elliot cadeau", "donovan dent", "mackenzie mgbako", "nick davidson", "tae davis", "magoon gwath", "silas demary", "malachi smith", "izaiah pasha", "noah williamson", "jalen washington", "abdi bashir", "nicholas boyd")
+  ) %>%
+  mutate(
+    Players = str_to_title(Players)
+  )
+
+centers <- sq_transfer %>%
+  filter(position == "C")
+
+pg <- sq_transfer %>%
+  filter(position == "PG")
+
+wings <- sq_transfer %>%
+  filter(position == "SF" | position == "PF")
+
+guards <- sq_transfer %>%
+  filter(position == "SG" | position == "PG")
+
+labeled_players <- pg %>%
+  filter(
+    Shot.Making >= 0.10 | Assists_per_game >= 4.5 | 
+      Players %in% c("silas demary", "nicholas boyd", "dusty stromer")) %>%
+  mutate(
+    Players = str_to_title(Players)
+  )
+
+
+g1 <- ggplot(pg, aes(x = Assists_per_game, y = Shot.Making)) +
+  geom_image(aes(image = logo), size = 0.075) +
+  geom_label_repel(
+    data = labeled_players,
+    aes(label = Players),
+    size = 2.5,
+    color = "black",
+    fill = "#f4e7da",
+    box.padding = 0.1,
+    label.padding = 0.1,
+    label.size = 0.05,
+    max.overlaps = 35,
+    segment.color = NA
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Assists Per Game vs Shot Making Ability for Transfer Portal PG",
+    x = "Assists Per Game",
+    y = "Shot Making"
+  ) +
+  theme(
+    panel.background = element_rect(fill = "white", color = "black", size = 1.2),
+    plot.background = element_rect(fill = "white"),
+    plot.title = element_text(hjust = 0.5) + coord_flip()
+  )
+
+
+
+```
+
+```{r}
+ggsave("SQ_TransferPortal_assists.png", plot = g1, width = 10, height = 6, dpi = 300)
+```
+
+
